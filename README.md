@@ -1,8 +1,9 @@
 # Hexgogen
 
-Hexgogen generates Go API projects with a complete example feature and an
-embedded, versioned application template. The CLI uses the Go standard library;
-application dependencies belong to the generated project.
+Hexgogen generates Go API projects that follow **hexagonal architecture (ports
+and adapters)**, with a complete example feature and an embedded, versioned
+application template. The CLI uses the Go standard library; application
+dependencies belong to the generated project.
 
 ## Build and use
 
@@ -106,6 +107,12 @@ bash scripts/build-release.sh v0.1.0 linux amd64 dist
 ```
 
 ## Generated application
+
+The generated codebase follows hexagonal architecture: domain interfaces define
+the ports, Gin handlers provide the HTTP adapter, and PostgreSQL repositories
+provide the persistence adapter. Services implement application use cases against
+the repository interfaces, keeping them independent of the database implementation.
+The user example demonstrates the flow from handler to service to repository.
 
 Each project includes:
 
