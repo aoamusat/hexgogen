@@ -32,9 +32,10 @@ hexgogen version
 
 `new` creates a new directory under the current directory, or under `--dir`.
 It refuses an existing target, even an empty directory. `init` requires an
-existing, empty directory (`--dir` defaults to the current directory). Dotfiles
-count as existing content; symlink destinations are refused. Neither command
-merges into an existing project or overwrites files.
+existing directory containing no application files (`--dir` defaults to the current
+directory). An existing `.git` directory or worktree metadata file is allowed and
+preserved. Other dotfiles count as existing content; symlink destinations are
+refused. Neither command merges into an existing project or overwrites files.
 
 The module defaults to the project directory name, so `hexgogen new myapp` works
 for local development. Set `--module` to your repository's module path when
@@ -44,9 +45,65 @@ are rejected. Generation validates and renders files before creating a new
 directory, confines writes to the destination, and cleans up its own partial
 output on a write failure.
 
-Generation works offline. It writes files without running Git, downloading Go
-modules, starting containers, or applying database migrations. The generated
-README explains the next steps.
+Generation works offline. After writing the project, the CLI runs `git init` if
+the destination is not already part of a repository. Existing repositories,
+including parent repositories and linked worktrees, are preserved. Generated
+files remain unstaged, ready for your first commit. If Git is missing or setup
+fails, the project is still generated and a warning explains the next step.
+
+Go module downloads, containers, and database migrations are separate setup steps
+explained in the generated README.
+
+
+## Download a release binary
+
+Published [GitHub Releases](https://github.com/aoamusat/hexgogen/releases) include
+Linux, macOS (`darwin`), and Windows binaries for `amd64` and `arm64`. Download the
+archive for your OS and CPU together with `checksums.txt`. Archives include the
+CLI and README; the application template is embedded in the binary. Go is not
+required to run the CLI, but is required to build and run generated applications.
+
+For example, on Linux amd64 after downloading a release:
+
+```sh
+sha256sum --ignore-missing -c checksums.txt
+tar -xzf hexgogen_v0.1.0_linux_amd64.tar.gz
+sudo install -m 0755 hexgogen /usr/local/bin/hexgogen
+hexgogen version
+```
+
+Replace `v0.1.0` with the release you downloaded. On macOS, extract the matching
+`.tar.gz` and install the binary into a directory on PATH. On Windows, extract the
+`.zip` and put `hexgogen.exe` in a directory on PATH.
+
+## Publishing releases
+
+Push a semantic version tag after committing the release changes:
+
+```sh
+git tag -a v0.1.0 -m "Hexgogen v0.1.0"
+git push origin v0.1.0
+```
+
+The [release workflow](.github/workflows/release.yml) runs the reusable CI checks,
+including PostgreSQL integration tests, then cross-compiles all six platform
+binaries. It uploads `.tar.gz` archives for Linux/macOS and `.zip` archives for
+Windows as workflow artifacts. After every build succeeds, it verifies SHA-256
+checksums, creates a draft GitHub Release, uploads the archives and combined
+`checksums.txt`, and publishes the release. Tags such as `v0.1.0-rc.1` produce
+prereleases. The workflow uses `GITHUB_TOKEN`; no separate publishing secret is
+needed.
+
+A failed upload leaves a draft that can be retried by rerunning the workflow.
+Already-published release assets are preserved; use a new tag for changes. The
+release binaries report their tag in `hexgogen version`; `go install ...@v0.1.0`
+uses the module's embedded build information to report its version as well.
+
+For local packaging on Linux with Go, Bash, tar, zip, and sha256sum installed:
+
+```sh
+bash scripts/build-release.sh v0.1.0 linux amd64 dist
+```
 
 ## Generated application
 

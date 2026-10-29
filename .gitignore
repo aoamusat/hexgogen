@@ -35,3 +35,6 @@ go.work.sum
 # Local build output and development tools
 bin/
 .tools/
+
+# Packaged CLI release assets
+dist/

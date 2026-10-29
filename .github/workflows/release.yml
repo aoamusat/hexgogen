@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: check
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: templates/go.sum
+      - name: Build and package
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          TARGET_GOOS: ${{ matrix.goos }}
+          TARGET_GOARCH: ${{ matrix.goarch }}
+        run: bash scripts/build-release.sh "$RELEASE_TAG" "$TARGET_GOOS" "$TARGET_GOARCH" dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hexgogen-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: hexgogen-*
+          path: dist
+          merge-multiple: true
+      - name: Verify checksums and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(dist/*.tar.gz dist/*.zip)
+          if [[ ${#archives[@]} -ne 6 ]]; then
+            echo 'Expected all six platform archives before publishing' >&2
+            exit 1
+          fi
+          cat dist/*.sha256 | LC_ALL=C sort -k2 > dist/checksums.txt
+          (cd dist && sha256sum -c checksums.txt)
+
+          release_prerelease=false
+          release_flags=()
+          if [[ "${RELEASE_TAG%%+*}" == *-* ]]; then
+            release_prerelease=true
+            release_flags+=(--prerelease)
+          fi
+          if release_draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)"; then
+            if [[ "$release_draft" != true ]]; then
+              echo 'Release is already published; refusing to replace published assets' >&2
+              exit 1
+            fi
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft --generate-notes \
+              --title "$RELEASE_TAG" "${release_flags[@]}"
+          fi
+          gh release upload "$RELEASE_TAG" "${archives[@]}" dist/checksums.txt --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease="$release_prerelease"

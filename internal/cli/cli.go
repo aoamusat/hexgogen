@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 
 	"github.com/aoamusat/hexgogen/internal/generator"
@@ -21,8 +22,8 @@ const help = `Usage:
 
 Create a Go API with Gin, PostgreSQL, Zerolog, migrations, and tests.
 The module defaults to the project directory name. Use --module for a published path.
-Generation works offline and never runs go mod, git, Docker, or migration commands.
-New refuses existing targets. Init requires an existing, empty directory.
+Generation works offline and initializes Git unless already inside a repository.
+New refuses existing targets. Init allows an empty directory or Git metadata only.
 `
 
 type options struct {
@@ -41,7 +42,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "version does not accept arguments")
 			return 2
 		}
-		fmt.Fprintln(stdout, "hexgogen "+Version)
+		fmt.Fprintln(stdout, "hexgogen "+buildVersion())
 		return 0
 	}
 	command := args[0]
@@ -89,6 +90,9 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "hexgogen:", err)
 		return 1
 	}
+	if err := initializeGit(destination); err != nil {
+		fmt.Fprintf(stderr, "Warning: project files were generated, but Git setup was skipped: %v\n", err)
+	}
 	fmt.Fprintf(stdout, "Created project at %s\nModule: %s\nSee README.md in the project for database setup, migrations, and running the server.\n", destination, opts.module)
 	return 0
 }
@@ -130,4 +134,15 @@ func parse(args []string) (options, error) {
 		}
 	}
 	return opts, nil
+}
+
+// go install embeds the tagged module version without the Makefile's ldflags.
+func buildVersion() string {
+	if Version != "dev" {
+		return Version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return Version
 }

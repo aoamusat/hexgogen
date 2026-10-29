@@ -229,3 +229,40 @@ func TestGeneratedPostgresIntegration(t *testing.T) {
 	}
 	goCommand(t, destination, true, "test", "-race", "-count=1", "./internal/adapter/db/...")
 }
+
+func TestInitAllowsOnlyGitMetadata(t *testing.T) {
+	for _, file := range []bool{false, true} {
+		parent := t.TempDir()
+		project := filepath.Join(parent, "app")
+		if err := os.Mkdir(project, 0755); err != nil {
+			t.Fatal(err)
+		}
+		metadata := filepath.Join(project, ".git")
+		if file {
+			if err := os.WriteFile(metadata, []byte("gitdir: /elsewhere"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			if err := os.Mkdir(metadata, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(metadata, "config"), []byte("preserve"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := Init(project, "app"); err != nil {
+			t.Fatal(err)
+		}
+		if file {
+			data, err := os.ReadFile(metadata)
+			if err != nil || string(data) != "gitdir: /elsewhere" {
+				t.Fatal("Git metadata file changed")
+			}
+		} else {
+			data, err := os.ReadFile(filepath.Join(metadata, "config"))
+			if err != nil || string(data) != "preserve" {
+				t.Fatal("Git metadata directory changed")
+			}
+		}
+	}
+}

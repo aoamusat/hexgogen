@@ -48,7 +48,7 @@ func New(parent, name, module string) (string, error) {
 	return destination, nil
 }
 
-// Init initializes an existing, empty directory. Dotfiles count as existing files.
+// Init initializes an existing directory containing only optional Git metadata.
 func Init(directory, module string) (string, error) {
 	destination, err := filepath.Abs(directory)
 	if err != nil {
@@ -123,8 +123,11 @@ func populate(directory string, files []renderedFile) (result error) {
 	if err != nil {
 		return err
 	}
-	if len(entries) != 0 {
-		return errors.New("destination is not empty; no files were changed")
+	for _, entry := range entries {
+		if entry.Name() == ".git" && (entry.IsDir() || entry.Type().IsRegular()) {
+			continue
+		}
+		return errors.New("destination contains files other than Git metadata; no files were changed")
 	}
 	var created []string
 	defer func() {
