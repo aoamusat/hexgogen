@@ -1,0 +1,26 @@
+package dto
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+type TokenClaim struct {
+	UserID    uuid.UUID `json:"userID"`
+	ExpiresAt time.Time `json:"expiresAt"`
+	IssuedAt  time.Time `json:"issuedAt"`
+}
+
+func NewTokenClaim(userID uuid.UUID, duration time.Duration) TokenClaim {
+	now := time.Now().UTC()
+	return TokenClaim{
+		UserID:    userID,
+		IssuedAt:  now,
+		ExpiresAt: now.Add(duration),
+	}
+}
+
+func (a TokenClaim) Valid() bool {
+	return time.Now().Before(a.ExpiresAt)
+}

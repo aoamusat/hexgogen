@@ -1,94 +1,125 @@
 # Hexgogen
 
-A Go project starter using hexagonal architecture, Gin, PostgreSQL/GORM,
-Zerolog, and PASETO v2 local tokens.
+Hexgogen generates Go API projects with a complete example feature and an
+embedded, versioned application template. The CLI uses the Go standard library;
+application dependencies belong to the generated project.
 
-## Getting started
+## Build and use
 
-Install Go 1.25.6 or newer, PostgreSQL, and Make. Create a local database and
-configure the application:
+Install Go 1.25.6 or newer:
 
 ```sh
-createdb -h localhost -U postgres hexgogen
-cp .env.example .env
-# Edit .env to match your local database credentials.
-go mod download
-make run
+go build -o bin/hexgogen ./cmd/hexgogen
+./bin/hexgogen new myapp --module github.com/yourname/myapp
 ```
 
-The server defaults to port 8000 and requires a reachable PostgreSQL database.
-`GET /v1/users` is an empty example handler; user operations and authentication
-are placeholders for your application. They are not implemented or protected yet.
+For a checked-out repository, `go install ./cmd/hexgogen` installs the CLI into
+`GOBIN` (or the default Go bin directory). Add that directory to your PATH to use
+`hexgogen` directly. A published release can be installed with
+`go install github.com/aoamusat/hexgogen/cmd/hexgogen@<tag>`.
 
-For a new project, change the module path in `go.mod` and replace
-`github.com/aoamusat/hexgogen` in Go imports with your own module path.
+```sh
+hexgogen new myapp
+hexgogen new myapp --module github.com/yourname/myapp --dir /path/to/projects
 
-## Structure
+mkdir existing-project
+cd existing-project
+hexgogen init --module github.com/yourname/existing-project
+
+hexgogen --help
+hexgogen version
+```
+
+`new` creates a new directory under the current directory, or under `--dir`.
+It refuses an existing target, even an empty directory. `init` requires an
+existing, empty directory (`--dir` defaults to the current directory). Dotfiles
+count as existing content; symlink destinations are refused. Neither command
+merges into an existing project or overwrites files.
+
+The module defaults to the project directory name, so `hexgogen new myapp` works
+for local development. Set `--module` to your repository's module path when
+sharing or publishing the project. Names start with a letter or digit and use
+letters, digits, dots, hyphens, or underscores. Paths and reserved device names
+are rejected. Generation validates and renders files before creating a new
+directory, confines writes to the destination, and cleans up its own partial
+output on a write failure.
+
+Generation works offline. It writes files without running Git, downloading Go
+modules, starting containers, or applying database migrations. The generated
+README explains the next steps.
+
+## Generated application
+
+Each project includes:
+
+- A create/get-user example across handlers, services, repository interfaces,
+  PostgreSQL adapters, and a versioned SQL migration.
+- Consistent JSON responses, validation, application-error mapping, and request IDs.
+- `/healthz` and `/readyz` endpoints.
+- Zerolog JSON logs with configurable levels and structured request fields.
+- Request context propagation, HTTP/body limits, database pool controls, and
+  graceful SIGINT/SIGTERM shutdown.
+- `.env.example`, a Makefile, local PostgreSQL Compose setup, and migration commands.
+- Unit, token, and PostgreSQL integration tests, plus GitHub Actions CI.
+
+The user endpoints are public examples; authentication and authorization remain
+application decisions. A PASETO helper is included, with invalid-token tests.
+See the [application README](templates/README.md) for API and configuration details.
+
+## Repository layout
 
 ```text
-cmd/                  Entry point and process signal handling
-configs/              Environment loading and validation
-api/                  HTTP server, routes, middleware, and v1 handlers
-domain/              Entities, DTOs, service and repository contracts
-internal/adapter/     Service implementations and PostgreSQL adapters
-pkg/                  Reusable logging, token, and response helpers
-migrations/           Versioned SQL migrations
+cmd/hexgogen/          CLI entry point
+internal/cli/         Commands, argument parsing, and output
+internal/generator/   Validation, rendering, filesystem writes, and generation tests
+templates/embed.go    Embedded template definition
+templates/           Canonical application files alongside the embedding definition
 ```
 
-Requests flow from a Gin handler through a domain service interface to a service
-implementation, then through a repository interface to the database adapter.
-Most user contracts and models are intentionally empty; define their methods and
-fields when adding your first feature.
+Application Go source uses `.go.tmpl` suffixes, and the application module file
+is stored as `go.mod.tmpl`. This keeps application packages separate from the CLI
+while storing their source directly in `templates/`. Generation removes the
+`.tmpl` suffixes and formats the resulting Go files. The embedding patterns include
+dotfiles and CI workflows. Module paths and the README project name are replaced
+during generation.
 
-## Configuration
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `ENV` | `development` | `development` or `production` |
-| `PORT` | `8000` | HTTP port, from 1 to 65535 |
-| `DATABASE_URL` | Required | PostgreSQL connection URL |
-
-In development, `.env` is loaded before configuration is read. Existing process
-environment values take precedence. A missing `.env` is fine; malformed files
-and invalid configuration fail startup. Set `ENV=production` in the deployment
-environment to skip `.env` loading.
-
-Application and request logs use timestamped Zerolog JSON on stdout. Panics
-produce an error log and HTTP 500 response. CORS allows all origins in both
-environments without credentialed requests; restrict origins and explicitly
-configure credentials if your application needs cookie-based cross-origin auth.
-
-SIGINT and SIGTERM trigger graceful HTTP shutdown with a five-second deadline,
-followed by closing the database pool. Listener failures exit with a nonzero
-status. Build with `make build` and run `./bin/hexgogen` for deployments so signals
-reach the application process directly.
-
-## Migrations
-
-Install the pinned [golang-migrate CLI](https://github.com/golang-migrate/migrate/tree/master/cmd/migrate):
+To change the application, edit `templates/`, then run the checks. There is
+one canonical template, with no duplicated application source to synchronize.
+To inspect a runnable copy:
 
 ```sh
-make tools
-make migrate-create NAME=create_users
-# Add your schema SQL to the generated up and down files.
-export DATABASE_URL='postgres://postgres:postgres@localhost:5432/hexgogen?sslmode=disable'
-make migrate-up
-# To roll back the most recent migration:
-make migrate-down
+go run ./cmd/hexgogen new preview --module example.com/preview --dir /tmp
+cd /tmp/preview
+# Follow its README to start PostgreSQL, apply migrations, and run the server.
 ```
 
-Migration commands read the exported `DATABASE_URL`; they do not load `.env`.
-There is no initial application schema because the domain entities are empty.
-Run migrations after defining your schema and before starting code that depends
-on it. The server does not run automatic schema changes. See
-[migrations/README.md](migrations/README.md) for conventions.
-
-## Checks
+## Validation
 
 ```sh
 make check
 ```
 
-This checks formatting, runs `go vet` and tests with the race detector, and builds
-the application. Unit tests do not require PostgreSQL. GitHub Actions runs these
-checks on pushes and pull requests using the Go version in `go.mod`.
+Checks include formatting (including template Go files), vet, race tests, and a CLI
+build. Generation tests verify module replacement, dotfiles, invalid inputs,
+overwrite refusal, filesystem confinement, and cleanup. They also generate an
+application and run its vet, race tests, and build; a local module name is built
+as well. The first full run needs access to download the application's Go modules
+unless they are already cached. `go test -short ./...` skips the generated
+application vet/test/build checks.
+
+For PostgreSQL integration tests, supply a dedicated test database with
+schema-creation privileges:
+
+```sh
+export TEST_DATABASE_URL='postgres://postgres:postgres@localhost:5432/hexgogen_test?sslmode=disable'
+make integration
+```
+
+These tests generate a project, exercise its repository and HTTP user flow, and
+check migration up/down/reapply in isolated, randomly named schemas. The database
+must already exist. Full `make check` also runs them when `TEST_DATABASE_URL` is
+set. CI provisions PostgreSQL and enables these checks. Generated projects have
+their own matching CI workflow.
+
+Build a versioned CLI with `make build VERSION=v0.1.0`. Release builds embed the
+application template at build time, so a CLI version always ships its own template.

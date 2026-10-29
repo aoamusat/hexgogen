@@ -1,0 +1,79 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"mime"
+	"net/http"
+
+	"github.com/aoamusat/hexgogen/domain/apperrors"
+	"github.com/gin-gonic/gin"
+)
+
+type ErrorBody struct {
+	Code      string            `json:"code"`
+	Message   string            `json:"message"`
+	Fields    map[string]string `json:"fields,omitempty"`
+	RequestID string            `json:"request_id,omitempty"`
+}
+
+func Success(ctx *gin.Context, status int, data any) {
+	ctx.JSON(status, gin.H{"data": data})
+}
+
+func Failure(ctx *gin.Context, status int, code, message string, fields map[string]string) {
+	ctx.AbortWithStatusJSON(status, gin.H{"error": ErrorBody{
+		Code: code, Message: message, Fields: fields, RequestID: ctx.GetString("request_id"),
+	}})
+}
+
+// Error translates application errors without exposing internal details.
+func Error(ctx *gin.Context, err error) {
+	var validation *apperrors.ValidationError
+	var tooLarge *http.MaxBytesError
+	switch {
+	case errors.Is(err, apperrors.ErrUnsupportedMediaType):
+		Failure(ctx, http.StatusUnsupportedMediaType, "unsupported_media_type", err.Error(), nil)
+	case errors.As(err, &tooLarge):
+		Failure(ctx, http.StatusRequestEntityTooLarge, "body_too_large", "request body exceeds the size limit", nil)
+	case errors.As(err, &validation):
+		Failure(ctx, http.StatusBadRequest, "validation_error", validation.Error(), validation.Fields)
+	case errors.Is(err, apperrors.ErrNotFound):
+		Failure(ctx, http.StatusNotFound, "not_found", "resource not found", nil)
+	case errors.Is(err, context.DeadlineExceeded):
+		_ = ctx.Error(err)
+		Failure(ctx, http.StatusGatewayTimeout, "timeout", "request timed out", nil)
+	case errors.Is(err, context.Canceled):
+		Failure(ctx, http.StatusRequestTimeout, "request_canceled", "request was canceled", nil)
+	default:
+		_ = ctx.Error(err)
+		Failure(ctx, http.StatusInternalServerError, "internal_error", "an unexpected error occurred", nil)
+	}
+}
+
+func DecodeJSON(ctx *gin.Context, target any) error {
+	mediaType, _, err := mime.ParseMediaType(ctx.GetHeader("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		return apperrors.ErrUnsupportedMediaType
+	}
+	decoder := json.NewDecoder(ctx.Request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return bodyError(err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return bodyError(err)
+	}
+	return nil
+}
+
+func bodyError(err error) error {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		return err
+	}
+	return &apperrors.ValidationError{Fields: map[string]string{"body": "must contain one valid JSON object with known fields"}}
+}

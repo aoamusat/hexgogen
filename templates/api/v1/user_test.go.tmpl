@@ -1,0 +1,103 @@
+package v1
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/aoamusat/hexgogen/domain/apperrors"
+	"github.com/aoamusat/hexgogen/domain/dto"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+)
+
+type stubUsers struct {
+	err      error
+	received context.Context
+	calls    int
+}
+
+func (s *stubUsers) Create(ctx context.Context, input dto.CreateUser) (dto.User, error) {
+	s.received = ctx
+	s.calls++
+	return dto.User{ID: uuid.MustParse("cc639130-7c10-4f91-8515-45a542290e61"), Name: input.Name}, s.err
+}
+func (s *stubUsers) GetByID(ctx context.Context, id uuid.UUID) (dto.User, error) {
+	s.received = ctx
+	s.calls++
+	return dto.User{ID: id, Name: "Ada"}, s.err
+}
+
+func TestUserHandlers(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		name, method, path, body, media string
+		serviceErr                      error
+		status                          int
+		code                            string
+		calls                           int
+	}{
+		{name: "create", method: "POST", path: "/users", body: `{"name":"Ada"}`, media: "application/json", status: 201, calls: 1},
+		{name: "get", method: "GET", path: "/users/cc639130-7c10-4f91-8515-45a542290e61", status: 200, calls: 1},
+		{name: "invalid id", method: "GET", path: "/users/invalid", status: 400, code: "validation_error"},
+		{name: "zero id", method: "GET", path: "/users/00000000-0000-0000-0000-000000000000", status: 400, code: "validation_error"},
+		{name: "missing", method: "GET", path: "/users/cc639130-7c10-4f91-8515-45a542290e61", serviceErr: apperrors.ErrNotFound, status: 404, code: "not_found", calls: 1},
+		{name: "malformed", method: "POST", path: "/users", body: `{"name":`, media: "application/json", status: 400, code: "validation_error"},
+		{name: "unknown field", method: "POST", path: "/users", body: `{"name":"Ada","admin":true}`, media: "application/json", status: 400, code: "validation_error"},
+		{name: "multiple objects", method: "POST", path: "/users", body: `{"name":"Ada"} {}`, media: "application/json", status: 400, code: "validation_error"},
+		{name: "wrong media", method: "POST", path: "/users", body: `{"name":"Ada"}`, media: "text/plain", status: 415, code: "unsupported_media_type"},
+		{name: "validation", method: "POST", path: "/users", body: `{"name":""}`, media: "application/json", serviceErr: &apperrors.ValidationError{Fields: map[string]string{"name": "required"}}, status: 400, code: "validation_error", calls: 1},
+		{name: "internal", method: "POST", path: "/users", body: `{"name":"Ada"}`, media: "application/json", serviceErr: errors.New("secret database credentials"), status: 500, code: "internal_error", calls: 1},
+		{name: "deadline", method: "POST", path: "/users", body: `{"name":"Ada"}`, media: "application/json", serviceErr: context.DeadlineExceeded, status: 504, code: "timeout", calls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service := &stubUsers{err: tc.serviceErr}
+			h := Handler{UserService: service}
+			router := gin.New()
+			router.POST("/users", h.CreateUser())
+			router.GET("/users/:id", h.GetUser())
+			request := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			request.Header.Set("Content-Type", tc.media)
+			ctx, cancel := context.WithCancel(request.Context())
+			defer cancel()
+			request = request.WithContext(ctx)
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			if recorder.Code != tc.status {
+				t.Fatalf("got %d: %s", recorder.Code, recorder.Body.String())
+			}
+			if service.calls != tc.calls {
+				t.Fatalf("service calls: %d, want %d", service.calls, tc.calls)
+			}
+			if tc.calls > 0 && service.received != ctx {
+				t.Fatal("handler dropped request context")
+			}
+			var body struct {
+				Data  *dto.User `json:"data"`
+				Error *struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if tc.code != "" {
+				if body.Error == nil || body.Error.Code != tc.code {
+					t.Fatalf("unexpected error: %s", recorder.Body.String())
+				}
+			} else if body.Data == nil || body.Data.Name != "Ada" {
+				t.Fatalf("missing user: %s", recorder.Body.String())
+			}
+			if strings.Contains(recorder.Body.String(), "secret") {
+				t.Fatal("internal error leaked")
+			}
+			if tc.status == http.StatusCreated && recorder.Header().Get("Location") == "" {
+				t.Fatal("missing Location")
+			}
+		})
+	}
+}

@@ -1,15 +1,10 @@
-.DEFAULT_GOAL := run
+.DEFAULT_GOAL := build
+VERSION ?= dev
 
-MIGRATE := $(CURDIR)/.tools/bin/migrate
-MIGRATE_VERSION := v4.19.0
-
-.PHONY: run build test vet fmt-check check tools migrate-create migrate-up migrate-down
-
-run:
-	go run ./cmd
+.PHONY: build test vet fmt-check check integration
 
 build:
-	go build -o bin/hexgogen ./cmd
+	go build -ldflags "-X github.com/aoamusat/hexgogen/internal/cli.Version=$(VERSION)" -o bin/hexgogen ./cmd/hexgogen
 
 test:
 	go test -race ./...
@@ -18,21 +13,10 @@ vet:
 	go vet ./...
 
 fmt-check:
-	@test -z "$$(gofmt -l $$(find . -name '*.go' -not -path './vendor/*'))" || { echo "Run gofmt on Go source files"; exit 1; }
+	@test -z "$$(gofmt -l $$(find . \( -name '*.go' -o -name '*.go.tmpl' \) -not -path './vendor/*'))" || { echo 'Run gofmt on Go source and template files'; exit 1; }
 
 check: fmt-check vet test build
 
-tools:
-	GOBIN="$(CURDIR)/.tools/bin" go install -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@$(MIGRATE_VERSION)
-
-migrate-create:
-	@test -n "$(NAME)" || { echo 'Usage: make migrate-create NAME=create_users'; exit 1; }
-	@"$(MIGRATE)" create -ext sql -dir migrations -seq "$(NAME)"
-
-migrate-up:
-	@test -n "$$DATABASE_URL" || { echo 'Export DATABASE_URL before running migrations'; exit 1; }
-	@"$(MIGRATE)" -path migrations -database "$$DATABASE_URL" up
-
-migrate-down:
-	@test -n "$$DATABASE_URL" || { echo 'Export DATABASE_URL before running migrations'; exit 1; }
-	@"$(MIGRATE)" -path migrations -database "$$DATABASE_URL" down 1
+integration:
+	@test -n "$$TEST_DATABASE_URL" || { echo 'Export TEST_DATABASE_URL pointing to a test database'; exit 1; }
+	go test -race -count=1 ./internal/generator -run '^TestGeneratedPostgresIntegration$$'

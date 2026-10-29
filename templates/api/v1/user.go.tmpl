@@ -1,0 +1,44 @@
+package v1
+
+import (
+	"net/http"
+
+	"github.com/aoamusat/hexgogen/domain/apperrors"
+	"github.com/aoamusat/hexgogen/domain/dto"
+	response "github.com/aoamusat/hexgogen/pkg/api"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+)
+
+func (h *Handler) CreateUser() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		var input dto.CreateUser
+		if err := response.DecodeJSON(ctx, &input); err != nil {
+			response.Error(ctx, err)
+			return
+		}
+		user, err := h.UserService.Create(ctx.Request.Context(), input)
+		if err != nil {
+			response.Error(ctx, err)
+			return
+		}
+		ctx.Header("Location", "/v1/users/"+user.ID.String())
+		response.Success(ctx, http.StatusCreated, user)
+	}
+}
+
+func (h *Handler) GetUser() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		id, err := uuid.Parse(ctx.Param("id"))
+		if err != nil || id == uuid.Nil {
+			response.Error(ctx, &apperrors.ValidationError{Fields: map[string]string{"id": "must be a non-zero UUID"}})
+			return
+		}
+		user, err := h.UserService.GetByID(ctx.Request.Context(), id)
+		if err != nil {
+			response.Error(ctx, err)
+			return
+		}
+		response.Success(ctx, http.StatusOK, user)
+	}
+}

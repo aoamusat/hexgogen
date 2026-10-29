@@ -1,0 +1,32 @@
+package v1
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"time"
+
+	response "github.com/aoamusat/hexgogen/pkg/api"
+	"github.com/gin-gonic/gin"
+)
+
+func (h *Handler) Health() gin.HandlerFunc {
+	return func(ctx *gin.Context) { response.Success(ctx, http.StatusOK, gin.H{"status": "ok"}) }
+}
+
+func (h *Handler) Readiness() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		timeout := h.ReadinessTimeout
+		if timeout <= 0 {
+			timeout = time.Second
+		}
+		checkCtx, cancel := context.WithTimeout(ctx.Request.Context(), timeout)
+		defer cancel()
+		if err := h.Ready(checkCtx); err != nil {
+			_ = ctx.Error(fmt.Errorf("database readiness: %w", err))
+			response.Failure(ctx, http.StatusServiceUnavailable, "not_ready", "database is unavailable", nil)
+			return
+		}
+		response.Success(ctx, http.StatusOK, gin.H{"status": "ready"})
+	}
+}

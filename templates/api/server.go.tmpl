@@ -1,0 +1,168 @@
+package api
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"runtime/debug"
+	"time"
+
+	v1 "github.com/aoamusat/hexgogen/api/v1"
+	"github.com/aoamusat/hexgogen/configs"
+	domainservices "github.com/aoamusat/hexgogen/domain/services"
+	"github.com/aoamusat/hexgogen/internal/adapter/db"
+	"github.com/aoamusat/hexgogen/internal/adapter/services"
+	response "github.com/aoamusat/hexgogen/pkg/api"
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+)
+
+func Start(ctx context.Context, cfg configs.Config, log domainservices.Logger) error {
+	router := initializeRouter(cfg, log)
+	dbConn, err := db.Init(ctx, cfg.DbURL, db.Options{
+		ConnectTimeout:  cfg.DBConnectTimeout,
+		MaxOpenConns:    cfg.DBMaxOpenConns,
+		MaxIdleConns:    cfg.DBMaxIdleConns,
+		ConnMaxLifetime: cfg.DBConnMaxLifetime,
+		ConnMaxIdleTime: cfg.DBConnMaxIdleTime,
+	})
+	if err != nil {
+		return fmt.Errorf("initialize database: %w", err)
+	}
+	sqlDB, err := dbConn.DB()
+	if err != nil {
+		return fmt.Errorf("get database connection: %w", err)
+	}
+	defer func() {
+		if err := sqlDB.Close(); err != nil {
+			log.Error("Close database connection", err)
+		}
+	}()
+	h := v1.Handler{
+		UserService:      services.NewUserService(db.NewUsersDB(dbConn)),
+		Ready:            sqlDB.PingContext,
+		ReadinessTimeout: cfg.ReadinessTimeout,
+	}
+	RegisterRoutes(router, &h)
+	server := &http.Server{
+		Handler:           router,
+		Addr:              ":" + cfg.Port,
+		ReadHeaderTimeout: cfg.HTTPReadHeaderTimeout,
+		ReadTimeout:       cfg.HTTPReadTimeout,
+		WriteTimeout:      cfg.HTTPWriteTimeout,
+		IdleTimeout:       cfg.HTTPIdleTimeout,
+	}
+	log.Info("Starting HTTP server on " + server.Addr)
+	return serve(ctx, server, log, cfg.ShutdownTimeout)
+}
+
+type httpServer interface {
+	ListenAndServe() error
+	Shutdown(context.Context) error
+	Close() error
+}
+
+func serve(ctx context.Context, server httpServer, log domainservices.Logger, shutdownTimeout time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	serverErrors := make(chan error, 1)
+	go func() { serverErrors <- server.ListenAndServe() }()
+	select {
+	case err := <-serverErrors:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return fmt.Errorf("serve HTTP: %w", err)
+	case <-ctx.Done():
+		log.Info("Shutting down HTTP server")
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		return errors.Join(fmt.Errorf("shut down HTTP server: %w", err), server.Close())
+	}
+	if err := <-serverErrors; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("serve HTTP: %w", err)
+	}
+	log.Info("HTTP server stopped")
+	return nil
+}
+
+func initializeRouter(cfg configs.Config, log domainservices.Logger) *gin.Engine {
+	if cfg.Env == configs.PRODUCTION {
+		gin.SetMode(gin.ReleaseMode)
+	} else {
+		gin.SetMode(gin.DebugMode)
+	}
+	router := gin.New()
+	router.HandleMethodNotAllowed = true
+	router.NoRoute(func(ctx *gin.Context) {
+		response.Failure(ctx, http.StatusNotFound, "not_found", "route not found", nil)
+	})
+	router.NoMethod(func(ctx *gin.Context) {
+		response.Failure(ctx, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", nil)
+	})
+	// Reverse proxies should be configured explicitly by the application.
+	_ = router.SetTrustedProxies(nil)
+	router.Use(func(ctx *gin.Context) {
+		start := time.Now()
+		id, err := uuid.Parse(ctx.GetHeader("X-Request-ID"))
+		if err != nil || id == uuid.Nil {
+			id = uuid.New()
+		}
+		ctx.Set("request_id", id.String())
+		ctx.Header("X-Request-ID", id.String())
+		requestCtx, cancel := context.WithTimeout(ctx.Request.Context(), cfg.HTTPRequestTimeout)
+		defer cancel()
+		ctx.Request = ctx.Request.WithContext(requestCtx)
+		ctx.Request.Body = http.MaxBytesReader(ctx.Writer, ctx.Request.Body, int64(cfg.MaxBodyBytes))
+		ctx.Next()
+		requestLog := log.With(map[string]any{
+			"request_id": id.String(), "method": ctx.Request.Method, "path": ctx.Request.URL.Path,
+			"status": ctx.Writer.Status(), "latency_ms": float64(time.Since(start)) / float64(time.Millisecond),
+		})
+		for _, err := range ctx.Errors {
+			requestLog.Error("HTTP request failed", err.Err)
+		}
+		requestLog.Info("HTTP request completed")
+	})
+	router.Use(gin.CustomRecoveryWithWriter(nil, func(ctx *gin.Context, recovered any) {
+		_ = ctx.Error(fmt.Errorf("HTTP handler panic: %v\n%s", recovered, debug.Stack()))
+		response.Failure(ctx, http.StatusInternalServerError, "internal_error", "an unexpected error occurred", nil)
+	}))
+	corsHandler := cors.New(cors.Config{
+		AllowOrigins:     cfg.CORSOrigins,
+		AllowMethods:     []string{"POST", "GET", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Content-Type", "Authorization", "X-Request-ID"},
+		ExposeHeaders:    []string{"Content-Length", "X-Request-ID", "Location"},
+		AllowCredentials: cfg.CORSCredentials,
+		MaxAge:           12 * time.Hour,
+	})
+	router.Use(func(ctx *gin.Context) {
+		origin := ctx.GetHeader("Origin")
+		allowed := origin == "" || origin == "http://"+ctx.Request.Host || origin == "https://"+ctx.Request.Host
+		for _, configured := range cfg.CORSOrigins {
+			if configured == "*" || configured == origin {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			response.Failure(ctx, http.StatusForbidden, "origin_not_allowed", "request origin is not allowed", nil)
+			return
+		}
+		corsHandler(ctx)
+	})
+	return router
+}
+
+func RegisterRoutes(router *gin.Engine, v1Handler *v1.Handler) {
+	router.GET("/healthz", v1Handler.Health())
+	router.GET("/readyz", v1Handler.Readiness())
+	apiRouter := router.Group("/v1")
+	apiRouter.POST("/users", v1Handler.CreateUser())
+	apiRouter.GET("/users/:id", v1Handler.GetUser())
+}

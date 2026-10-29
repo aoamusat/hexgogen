@@ -1,0 +1,34 @@
+package main
+
+import (
+	"context"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/aoamusat/hexgogen/api"
+	"github.com/aoamusat/hexgogen/configs"
+	"github.com/aoamusat/hexgogen/pkg/logger"
+)
+
+func main() {
+	if err := run(); err != nil {
+		log, _ := logger.NewZerolog(os.Stdout, "info")
+		log.Error("Application stopped", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	cfg, err := configs.LoadConfig()
+	if err != nil {
+		return err
+	}
+	log, err := logger.NewZerolog(os.Stdout, cfg.LogLevel)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return api.Start(ctx, cfg, log)
+}

@@ -1,0 +1,16 @@
+package dto
+
+import (
+	"github.com/google/uuid"
+	"time"
+)
+
+type CreateUser struct {
+	Name string `json:"name"`
+}
+
+type User struct {
+	ID        uuid.UUID `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}

@@ -1,0 +1,12 @@
+package services
+
+import (
+	"context"
+	"github.com/aoamusat/hexgogen/domain/dto"
+	"github.com/google/uuid"
+)
+
+type UserService interface {
+	Create(context.Context, dto.CreateUser) (dto.User, error)
+	GetByID(context.Context, uuid.UUID) (dto.User, error)
+}

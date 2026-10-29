@@ -1,0 +1,38 @@
+package db
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/aoamusat/hexgogen/domain/apperrors"
+	"github.com/aoamusat/hexgogen/domain/entities"
+	"github.com/aoamusat/hexgogen/domain/repositories"
+	"github.com/google/uuid"
+	"gorm.io/gorm"
+)
+
+type usersDB struct{ dbConn *gorm.DB }
+
+var _ repositories.UserDB = (*usersDB)(nil)
+
+func NewUsersDB(conn *gorm.DB) repositories.UserDB { return &usersDB{dbConn: conn} }
+
+func (r *usersDB) Create(ctx context.Context, user *entities.User) error {
+	if err := r.dbConn.WithContext(ctx).Create(user).Error; err != nil {
+		return fmt.Errorf("create user: %w", err)
+	}
+	return nil
+}
+
+func (r *usersDB) GetByID(ctx context.Context, id uuid.UUID) (entities.User, error) {
+	var user entities.User
+	err := r.dbConn.WithContext(ctx).First(&user, "id = ?", id).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return entities.User{}, apperrors.ErrNotFound
+	}
+	if err != nil {
+		return entities.User{}, fmt.Errorf("get user: %w", err)
+	}
+	return user, nil
+}

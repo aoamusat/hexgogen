@@ -1,0 +1,54 @@
+package db
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
+)
+
+type Options struct {
+	ConnectTimeout  time.Duration
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
+	ConnMaxIdleTime time.Duration
+}
+
+func Init(ctx context.Context, dbURL string, opts Options) (*gorm.DB, error) {
+	if dbURL == "" {
+		return nil, errors.New("database URL is required")
+	}
+	if opts.ConnectTimeout <= 0 || opts.MaxOpenConns < 1 || opts.MaxIdleConns < 0 || opts.MaxIdleConns > opts.MaxOpenConns {
+		return nil, errors.New("invalid database connection options")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	conn, err := gorm.Open(postgres.Open(dbURL), &gorm.Config{
+		Logger:               logger.Default.LogMode(logger.Silent),
+		DisableAutomaticPing: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open PostgreSQL: %w", err)
+	}
+	pool, err := conn.DB()
+	if err != nil {
+		return nil, fmt.Errorf("get database pool: %w", err)
+	}
+	pool.SetMaxOpenConns(opts.MaxOpenConns)
+	pool.SetMaxIdleConns(opts.MaxIdleConns)
+	pool.SetConnMaxLifetime(opts.ConnMaxLifetime)
+	pool.SetConnMaxIdleTime(opts.ConnMaxIdleTime)
+	pingCtx, cancel := context.WithTimeout(ctx, opts.ConnectTimeout)
+	defer cancel()
+	if err := pool.PingContext(pingCtx); err != nil {
+		_ = pool.Close()
+		return nil, fmt.Errorf("connect to PostgreSQL: %w", err)
+	}
+	return conn, nil
+}

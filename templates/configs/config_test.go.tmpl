@@ -1,0 +1,148 @@
+package configs
+
+import (
+	"os"
+	"testing"
+)
+
+func cleanEnvironment(t *testing.T) {
+	t.Helper()
+	t.Chdir(t.TempDir())
+	for _, key := range []string{
+		"ENV", "DATABASE_URL", "PORT", "LOG_LEVEL", "CORS_ORIGINS", "CORS_CREDENTIALS",
+		"DB_CONNECT_TIMEOUT", "DB_MAX_OPEN_CONNS", "DB_MAX_IDLE_CONNS", "DB_CONN_MAX_LIFETIME", "DB_CONN_MAX_IDLE_TIME",
+		"HTTP_READ_HEADER_TIMEOUT", "HTTP_READ_TIMEOUT", "HTTP_WRITE_TIMEOUT", "HTTP_IDLE_TIMEOUT", "HTTP_REQUEST_TIMEOUT",
+		"SHUTDOWN_TIMEOUT", "READINESS_TIMEOUT", "HTTP_MAX_BODY_BYTES",
+	} {
+		t.Setenv(key, "")
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func writeEnv(t *testing.T, content string) {
+	t.Helper()
+	if err := os.WriteFile(".env", []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadConfigLoadsDotEnvBeforeReadingValues(t *testing.T) {
+	cleanEnvironment(t)
+	writeEnv(t, "ENV=development\nDATABASE_URL=postgres://dotenv\nPORT=9000\n")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Env != DEVELOPMENT || cfg.DbURL != "postgres://dotenv" || cfg.Port != "9000" {
+		t.Fatalf("unexpected configuration: %+v", cfg)
+	}
+}
+
+func TestLoadConfigPreservesProcessEnvironment(t *testing.T) {
+	cleanEnvironment(t)
+	writeEnv(t, "DATABASE_URL=postgres://dotenv\nPORT=9000\n")
+	t.Setenv("DATABASE_URL", "postgres://process")
+	t.Setenv("PORT", "8001")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DbURL != "postgres://process" || cfg.Port != "8001" {
+		t.Fatalf("process environment was overwritten: %+v", cfg)
+	}
+}
+
+func TestLoadConfigProductionSkipsDotEnv(t *testing.T) {
+	cleanEnvironment(t)
+	writeEnv(t, "this is not a valid env file!")
+	t.Setenv("ENV", PRODUCTION)
+	t.Setenv("DATABASE_URL", "postgres://production")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Env != PRODUCTION || cfg.Port != "8000" {
+		t.Fatalf("unexpected configuration: %+v", cfg)
+	}
+}
+
+func TestLoadConfigDefaultsWithoutDotEnv(t *testing.T) {
+	cleanEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://local")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Env != DEVELOPMENT || cfg.Port != "8000" {
+		t.Fatalf("unexpected defaults: %+v", cfg)
+	}
+}
+
+func TestLoadConfigRejectsInvalidConfiguration(t *testing.T) {
+	for _, tc := range []struct{ name, key, value string }{
+		{"missing database", "DATABASE_URL", ""},
+		{"unknown environment", "ENV", "staging"},
+		{"non-numeric port", "PORT", "http"},
+		{"zero port", "PORT", "0"},
+		{"negative port", "PORT", "-1"},
+		{"out of range port", "PORT", "65536"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cleanEnvironment(t)
+			t.Setenv("DATABASE_URL", "postgres://local")
+			t.Setenv(tc.key, tc.value)
+			if _, err := LoadConfig(); err == nil {
+				t.Fatal("expected configuration error")
+			}
+		})
+	}
+}
+
+func TestLoadConfigRejectsMalformedDotEnv(t *testing.T) {
+	cleanEnvironment(t)
+	writeEnv(t, "INVALID KEY!=value\n")
+	t.Setenv("DATABASE_URL", "postgres://local")
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("expected .env parsing error")
+	}
+}
+
+func TestRuntimeConfigurationValidation(t *testing.T) {
+	for _, tc := range []struct{ key, value string }{
+		{"DB_CONNECT_TIMEOUT", "0s"}, {"DB_CONN_MAX_LIFETIME", "bad"}, {"DB_MAX_OPEN_CONNS", "0"},
+		{"DB_MAX_IDLE_CONNS", "11"}, {"LOG_LEVEL", "verbose"}, {"CORS_ORIGINS", "https://example.com/path"},
+		{"CORS_ORIGINS", "https://*.example.com"},
+		{"CORS_ORIGINS", "*,https://example.com"}, {"CORS_CREDENTIALS", "true"}, {"CORS_CREDENTIALS", "bad"},
+		{"HTTP_REQUEST_TIMEOUT", "-1s"}, {"HTTP_WRITE_TIMEOUT", "1s"}, {"HTTP_MAX_BODY_BYTES", "0"},
+		{"SHUTDOWN_TIMEOUT", "bad"}, {"READINESS_TIMEOUT", "0"},
+	} {
+		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
+			cleanEnvironment(t)
+			t.Setenv("DATABASE_URL", "postgres://local")
+			t.Setenv(tc.key, tc.value)
+			if _, err := LoadConfig(); err == nil {
+				t.Fatal("invalid runtime configuration accepted")
+			}
+		})
+	}
+}
+
+func TestRuntimeConfigurationOverrides(t *testing.T) {
+	cleanEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://local")
+	t.Setenv("LOG_LEVEL", "debug")
+	t.Setenv("CORS_ORIGINS", "https://app.example.com, https://admin.example.com")
+	t.Setenv("CORS_CREDENTIALS", "true")
+	t.Setenv("DB_MAX_OPEN_CONNS", "20")
+	t.Setenv("DB_MAX_IDLE_CONNS", "10")
+	t.Setenv("HTTP_MAX_BODY_BYTES", "4096")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LogLevel != "debug" || len(cfg.CORSOrigins) != 2 || !cfg.CORSCredentials || cfg.DBMaxOpenConns != 20 || cfg.MaxBodyBytes != 4096 {
+		t.Fatalf("configuration overrides missing: %+v", cfg)
+	}
+}

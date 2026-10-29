@@ -1,0 +1,87 @@
+package services
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/aoamusat/hexgogen/domain/apperrors"
+	"github.com/aoamusat/hexgogen/domain/dto"
+	"github.com/aoamusat/hexgogen/domain/entities"
+	"github.com/google/uuid"
+)
+
+type memoryUsers struct {
+	user    entities.User
+	err     error
+	ctx     context.Context
+	creates int
+}
+
+func (m *memoryUsers) Create(ctx context.Context, user *entities.User) error {
+	m.ctx = ctx
+	m.creates++
+	m.user = *user
+	return m.err
+}
+func (m *memoryUsers) GetByID(ctx context.Context, id uuid.UUID) (entities.User, error) {
+	m.ctx = ctx
+	if m.err != nil {
+		return entities.User{}, m.err
+	}
+	if id != m.user.ID {
+		return entities.User{}, apperrors.ErrNotFound
+	}
+	return m.user, nil
+}
+
+func TestUserServiceCreateAndGet(t *testing.T) {
+	repo := &memoryUsers{}
+	service := NewUserService(repo)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	user, err := service.Create(ctx, dto.CreateUser{Name: "  Ada  "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.ID == uuid.Nil || user.Name != "Ada" || user.CreatedAt.IsZero() {
+		t.Fatalf("unexpected user: %+v", user)
+	}
+	if repo.ctx != ctx {
+		t.Fatal("request context was not propagated")
+	}
+	got, err := service.GetByID(ctx, user.ID)
+	if err != nil || got != user {
+		t.Fatalf("get user: %+v, %v", got, err)
+	}
+	if _, err := service.GetByID(ctx, uuid.New()); !errors.Is(err, apperrors.ErrNotFound) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestUserServiceRejectsInvalidNamesBeforeWriting(t *testing.T) {
+	for _, name := range []string{"", "   ", strings.Repeat("a", 101), strings.Repeat("界", 101)} {
+		repo := &memoryUsers{}
+		_, err := NewUserService(repo).Create(context.Background(), dto.CreateUser{Name: name})
+		var validation *apperrors.ValidationError
+		if !errors.As(err, &validation) || repo.creates != 0 {
+			t.Fatalf("name %q: err=%v writes=%d", name, err, repo.creates)
+		}
+	}
+	// The limit is characters, not bytes.
+	if _, err := NewUserService(&memoryUsers{}).Create(context.Background(), dto.CreateUser{Name: strings.Repeat("界", 100)}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUserServicePropagatesRepositoryErrors(t *testing.T) {
+	repo := &memoryUsers{err: errors.New("database unavailable")}
+	service := NewUserService(repo)
+	if _, err := service.Create(context.Background(), dto.CreateUser{Name: "Ada"}); !errors.Is(err, repo.err) {
+		t.Fatal(err)
+	}
+	if _, err := service.GetByID(context.Background(), uuid.New()); !errors.Is(err, repo.err) {
+		t.Fatal(err)
+	}
+}

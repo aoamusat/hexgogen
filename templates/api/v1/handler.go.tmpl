@@ -1,0 +1,13 @@
+package v1
+
+import (
+	"context"
+	"github.com/aoamusat/hexgogen/domain/services"
+	"time"
+)
+
+type Handler struct {
+	UserService      services.UserService
+	Ready            func(context.Context) error
+	ReadinessTimeout time.Duration
+}

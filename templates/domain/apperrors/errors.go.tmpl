@@ -1,0 +1,13 @@
+package apperrors
+
+import "errors"
+
+var (
+	ErrNotFound             = errors.New("resource not found")
+	ErrUnsupportedMediaType = errors.New("Content-Type must be application/json")
+)
+
+// ValidationError describes safe, client-facing validation failures.
+type ValidationError struct{ Fields map[string]string }
+
+func (e *ValidationError) Error() string { return "validation failed" }

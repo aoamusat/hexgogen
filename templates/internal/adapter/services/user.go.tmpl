@@ -1,0 +1,47 @@
+package services
+
+import (
+	"context"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/aoamusat/hexgogen/domain/apperrors"
+	"github.com/aoamusat/hexgogen/domain/dto"
+	"github.com/aoamusat/hexgogen/domain/entities"
+	"github.com/aoamusat/hexgogen/domain/repositories"
+	"github.com/aoamusat/hexgogen/domain/services"
+	"github.com/google/uuid"
+)
+
+type userService struct{ usersDB repositories.UserDB }
+
+var _ services.UserService = (*userService)(nil)
+
+func NewUserService(usersDB repositories.UserDB) services.UserService {
+	return &userService{usersDB: usersDB}
+}
+
+func (s *userService) Create(ctx context.Context, input dto.CreateUser) (dto.User, error) {
+	name := strings.TrimSpace(input.Name)
+	if name == "" || utf8.RuneCountInString(name) > 100 {
+		return dto.User{}, &apperrors.ValidationError{Fields: map[string]string{"name": "must contain 1 to 100 characters"}}
+	}
+	user := entities.User{ID: uuid.New(), Name: name, CreatedAt: time.Now().UTC()}
+	if err := s.usersDB.Create(ctx, &user); err != nil {
+		return dto.User{}, err
+	}
+	return userDTO(user), nil
+}
+
+func (s *userService) GetByID(ctx context.Context, id uuid.UUID) (dto.User, error) {
+	user, err := s.usersDB.GetByID(ctx, id)
+	if err != nil {
+		return dto.User{}, err
+	}
+	return userDTO(user), nil
+}
+
+func userDTO(user entities.User) dto.User {
+	return dto.User{ID: user.ID, Name: user.Name, CreatedAt: user.CreatedAt}
+}

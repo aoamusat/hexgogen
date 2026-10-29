@@ -1,0 +1,170 @@
+package configs
+
+import (
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/joho/godotenv"
+)
+
+type Config struct {
+	Env                   string
+	DbURL                 string
+	Port                  string
+	LogLevel              string
+	CORSOrigins           []string
+	CORSCredentials       bool
+	HTTPReadHeaderTimeout time.Duration
+	HTTPReadTimeout       time.Duration
+	HTTPWriteTimeout      time.Duration
+	HTTPIdleTimeout       time.Duration
+	HTTPRequestTimeout    time.Duration
+	ShutdownTimeout       time.Duration
+	ReadinessTimeout      time.Duration
+	MaxBodyBytes          int
+	DBConnectTimeout      time.Duration
+	DBMaxOpenConns        int
+	DBMaxIdleConns        int
+	DBConnMaxLifetime     time.Duration
+	DBConnMaxIdleTime     time.Duration
+}
+
+// LoadConfig loads optional local configuration before reading environment values.
+// Existing environment variables take precedence over .env values. Production
+// deployments should set ENV=production in their environment to skip .env loading.
+func LoadConfig() (Config, error) {
+	if os.Getenv("ENV") != PRODUCTION {
+		if err := godotenv.Load(); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return Config{}, fmt.Errorf("load .env: %w", err)
+		}
+	}
+	cfg := Config{Env: os.Getenv("ENV"), DbURL: os.Getenv("DATABASE_URL"), Port: os.Getenv("PORT")}
+	var err error
+	cfg.LogLevel = os.Getenv("LOG_LEVEL")
+	if cfg.LogLevel == "" {
+		cfg.LogLevel = "info"
+	}
+	switch cfg.LogLevel {
+	case "debug", "info", "warn", "error":
+	default:
+		return Config{}, errors.New("LOG_LEVEL must be debug, info, warn, or error")
+	}
+	origins := os.Getenv("CORS_ORIGINS")
+	if origins == "" {
+		origins = "*"
+	}
+	cfg.CORSOrigins = strings.Split(origins, ",")
+	for i, origin := range cfg.CORSOrigins {
+		origin = strings.TrimSpace(origin)
+		cfg.CORSOrigins[i] = origin
+		if origin == "*" {
+			if len(cfg.CORSOrigins) != 1 {
+				return Config{}, errors.New("CORS_ORIGINS wildcard must be used alone")
+			}
+			continue
+		}
+		if strings.Contains(origin, "*") {
+			return Config{}, errors.New("CORS_ORIGINS must use exact origins or a single wildcard")
+		}
+		parsed, parseErr := url.Parse(origin)
+		if parseErr != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return Config{}, errors.New("CORS_ORIGINS must contain HTTP origins separated by commas")
+		}
+	}
+	if raw := os.Getenv("CORS_CREDENTIALS"); raw != "" {
+		cfg.CORSCredentials, err = strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, errors.New("CORS_CREDENTIALS must be a boolean")
+		}
+	}
+	if cfg.CORSCredentials && cfg.CORSOrigins[0] == "*" {
+		return Config{}, errors.New("credentialed CORS requires explicit origins")
+	}
+	for _, item := range []struct {
+		key      string
+		target   *time.Duration
+		fallback time.Duration
+	}{
+		{"HTTP_READ_HEADER_TIMEOUT", &cfg.HTTPReadHeaderTimeout, 5 * time.Second},
+		{"HTTP_READ_TIMEOUT", &cfg.HTTPReadTimeout, 15 * time.Second},
+		{"HTTP_WRITE_TIMEOUT", &cfg.HTTPWriteTimeout, 15 * time.Second},
+		{"HTTP_IDLE_TIMEOUT", &cfg.HTTPIdleTimeout, 60 * time.Second},
+		{"HTTP_REQUEST_TIMEOUT", &cfg.HTTPRequestTimeout, 10 * time.Second},
+		{"SHUTDOWN_TIMEOUT", &cfg.ShutdownTimeout, 5 * time.Second},
+		{"READINESS_TIMEOUT", &cfg.ReadinessTimeout, time.Second},
+	} {
+		if *item.target, err = duration(item.key, item.fallback); err != nil {
+			return Config{}, err
+		}
+	}
+	if cfg.HTTPWriteTimeout <= cfg.HTTPRequestTimeout {
+		return Config{}, errors.New("HTTP_WRITE_TIMEOUT must exceed HTTP_REQUEST_TIMEOUT")
+	}
+	if cfg.MaxBodyBytes, err = integer("HTTP_MAX_BODY_BYTES", 1<<20, 1); err != nil {
+		return Config{}, err
+	}
+	if cfg.DBConnectTimeout, err = duration("DB_CONNECT_TIMEOUT", 5*time.Second); err != nil {
+		return Config{}, err
+	}
+	if cfg.DBConnMaxLifetime, err = duration("DB_CONN_MAX_LIFETIME", 30*time.Minute); err != nil {
+		return Config{}, err
+	}
+	if cfg.DBConnMaxIdleTime, err = duration("DB_CONN_MAX_IDLE_TIME", 5*time.Minute); err != nil {
+		return Config{}, err
+	}
+	if cfg.DBMaxOpenConns, err = integer("DB_MAX_OPEN_CONNS", 10, 1); err != nil {
+		return Config{}, err
+	}
+	if cfg.DBMaxIdleConns, err = integer("DB_MAX_IDLE_CONNS", 5, 0); err != nil {
+		return Config{}, err
+	}
+	if cfg.DBMaxIdleConns > cfg.DBMaxOpenConns {
+		return Config{}, errors.New("DB_MAX_IDLE_CONNS must not exceed DB_MAX_OPEN_CONNS")
+	}
+	if cfg.Env == "" {
+		cfg.Env = DEVELOPMENT
+	}
+	if cfg.Port == "" {
+		cfg.Port = "8000"
+	}
+	if cfg.Env != DEVELOPMENT && cfg.Env != PRODUCTION {
+		return Config{}, fmt.Errorf("ENV must be %q or %q", DEVELOPMENT, PRODUCTION)
+	}
+	if cfg.DbURL == "" {
+		return Config{}, errors.New("DATABASE_URL is required")
+	}
+	port, err := strconv.Atoi(cfg.Port)
+	if err != nil || port < 1 || port > 65535 {
+		return Config{}, errors.New("PORT must be a number between 1 and 65535")
+	}
+	return cfg, nil
+}
+
+func duration(key string, fallback time.Duration) (time.Duration, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive duration", key)
+	}
+	return value, nil
+}
+
+func integer(key string, fallback, minimum int) (int, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < minimum {
+		return 0, fmt.Errorf("%s must be an integer of at least %d", key, minimum)
+	}
+	return value, nil
+}

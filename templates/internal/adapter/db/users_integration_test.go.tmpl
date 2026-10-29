@@ -1,0 +1,185 @@
+package db_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"github.com/aoamusat/hexgogen/api"
+	v1 "github.com/aoamusat/hexgogen/api/v1"
+	"github.com/aoamusat/hexgogen/domain/dto"
+	userservice "github.com/aoamusat/hexgogen/internal/adapter/services"
+	"github.com/gin-gonic/gin"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/aoamusat/hexgogen/domain/apperrors"
+	"github.com/aoamusat/hexgogen/domain/entities"
+	"github.com/aoamusat/hexgogen/internal/adapter/db"
+	"github.com/google/uuid"
+	"gorm.io/gorm"
+)
+
+// Integration tests use an isolated schema in an explicitly supplied test DB.
+func integrationDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	opts := db.Options{ConnectTimeout: 5 * time.Second, MaxOpenConns: 5, MaxIdleConns: 2, ConnMaxLifetime: time.Minute, ConnMaxIdleTime: time.Minute}
+	admin, err := db.Init(ctx, dsn, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminPool, err := admin.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = adminPool.Close() })
+	schema := "hexgogen_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if err := admin.Exec("CREATE SCHEMA " + schema).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := admin.Exec("DROP SCHEMA " + schema + " CASCADE").Error; err != nil {
+			t.Error(err)
+		}
+	})
+	parsed, err := url.Parse(dsn)
+	if err != nil || parsed.Host == "" {
+		t.Fatal("TEST_DATABASE_URL must be a PostgreSQL URL")
+	}
+	query := parsed.Query()
+	query.Set("search_path", schema)
+	parsed.RawQuery = query.Encode()
+	conn, err := db.Init(ctx, parsed.String(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := conn.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+	return conn
+}
+
+func migration(t *testing.T, conn *gorm.DB, direction string) {
+	t.Helper()
+	sql, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "000001_create_users."+direction+".sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Exec(string(sql)).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPostgresUserRepositoryAndMigrations(t *testing.T) {
+	conn := integrationDB(t)
+	migration(t, conn, "up")
+	repo := db.NewUsersDB(conn)
+	ctx := context.Background()
+	original := entities.User{ID: uuid.New(), Name: "Ada", CreatedAt: time.Now().UTC().Truncate(time.Microsecond)}
+	if err := repo.Create(ctx, &original); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.GetByID(ctx, original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != original.ID || got.Name != original.Name || !got.CreatedAt.Equal(original.CreatedAt) {
+		t.Fatalf("round trip mismatch: %+v", got)
+	}
+	if _, err := repo.GetByID(ctx, uuid.New()); !errors.Is(err, apperrors.ErrNotFound) {
+		t.Fatalf("missing user: %v", err)
+	}
+	if err := repo.Create(ctx, &original); err == nil {
+		t.Fatal("duplicate primary key accepted")
+	}
+	invalid := entities.User{ID: uuid.New(), Name: " ", CreatedAt: original.CreatedAt}
+	if err := repo.Create(ctx, &invalid); err == nil {
+		t.Fatal("database accepted invalid name")
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := repo.GetByID(canceled, original.ID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled query: %v", err)
+	}
+	invalid.Name = "Canceled"
+	if err := repo.Create(canceled, &invalid); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled write: %v", err)
+	}
+	migration(t, conn, "down")
+	var exists bool
+	if err := conn.Raw("SELECT to_regclass('users') IS NOT NULL").Scan(&exists).Error; err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatal("down migration did not drop users")
+	}
+	migration(t, conn, "up")
+	if _, err := repo.GetByID(ctx, original.ID); !errors.Is(err, apperrors.ErrNotFound) {
+		t.Fatalf("reapplied migration is not clean: %v", err)
+	}
+	migration(t, conn, "down")
+}
+
+func TestPostgresHTTPUserFlow(t *testing.T) {
+	conn := integrationDB(t)
+	migration(t, conn, "up")
+	pool, err := conn.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pool.Stats().MaxOpenConnections != 5 {
+		t.Fatal("connection pool limit was not applied")
+	}
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	h := v1.Handler{UserService: userservice.NewUserService(db.NewUsersDB(conn)), Ready: pool.PingContext, ReadinessTimeout: time.Second}
+	api.RegisterRoutes(router, &h)
+	create := httptest.NewRequest("POST", "/v1/users", strings.NewReader(`{"name":"  Ada  "}`))
+	create.Header.Set("Content-Type", "application/json")
+	created := httptest.NewRecorder()
+	router.ServeHTTP(created, create)
+	if created.Code != 201 {
+		t.Fatalf("create: %d %s", created.Code, created.Body.String())
+	}
+	var body struct {
+		Data dto.User `json:"data"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Data.Name != "Ada" || body.Data.ID == uuid.Nil {
+		t.Fatalf("invalid created user: %+v", body.Data)
+	}
+	fetched := httptest.NewRecorder()
+	router.ServeHTTP(fetched, httptest.NewRequest("GET", created.Header().Get("Location"), nil))
+	if fetched.Code != 200 {
+		t.Fatalf("fetch: %d %s", fetched.Code, fetched.Body.String())
+	}
+	for _, path := range []string{"/healthz", "/readyz"} {
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, httptest.NewRequest("GET", path, nil))
+		if recorder.Code != 200 {
+			t.Fatalf("%s: %d", path, recorder.Code)
+		}
+	}
+	if err := pool.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ready := httptest.NewRecorder()
+	router.ServeHTTP(ready, httptest.NewRequest("GET", "/readyz", nil))
+	if ready.Code != 503 {
+		t.Fatalf("closed database is ready: %d", ready.Code)
+	}
+}

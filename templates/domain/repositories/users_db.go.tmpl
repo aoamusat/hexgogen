@@ -1,0 +1,12 @@
+package repositories
+
+import (
+	"context"
+	"github.com/aoamusat/hexgogen/domain/entities"
+	"github.com/google/uuid"
+)
+
+type UserDB interface {
+	Create(context.Context, *entities.User) error
+	GetByID(context.Context, uuid.UUID) (entities.User, error)
+}

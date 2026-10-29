@@ -1,0 +1,25 @@
+package db
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+)
+
+func TestInitRejectsCanceledContextBeforeConnecting(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := Init(ctx, "postgres://localhost/unused", Options{ConnectTimeout: time.Second, MaxOpenConns: 1})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestInitRejectsInvalidOptions(t *testing.T) {
+	for _, opts := range []Options{{}, {ConnectTimeout: time.Second, MaxOpenConns: 1, MaxIdleConns: 2}} {
+		if _, err := Init(context.Background(), "postgres://localhost/unused", opts); err == nil {
+			t.Fatal("invalid options accepted")
+		}
+	}
+}
