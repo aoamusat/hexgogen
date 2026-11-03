@@ -70,8 +70,10 @@ the database implementation.
 The user feature demonstrates handler → service → repository → database. Each
 service/repository call receives the request context. Extend these small
 interfaces with the methods your application actually needs. Domain interfaces
-use domain types and do not expose Gin or GORM. The example entity contains GORM
-column tags for the sample PostgreSQL mapping.
+use domain types and do not expose Gin or GORM. The domain `User` entity has no
+ORM mappings. The database adapter owns its `userRecord` persistence model,
+including GORM column tags and the `users` table mapping, and converts between
+that record and the domain entity.
 
 ## Configuration
 

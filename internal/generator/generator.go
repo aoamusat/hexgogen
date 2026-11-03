@@ -24,48 +24,113 @@ var (
 	gopkgVersionPattern = regexp.MustCompile(`\.v(0|[1-9][0-9]*)(-unstable)?$`)
 )
 
-// New creates a project inside parent. An existing target is always refused.
-func New(parent, name, module string) (string, error) {
+// Plan describes the rendered files and destination without changing the filesystem.
+// Generate rechecks the destination before writing to protect against conflicts
+// introduced after the preview was created.
+type Plan struct {
+	destination     string
+	module          string
+	files           []renderedFile
+	createDirectory bool
+}
+
+func (p *Plan) Destination() string { return p.destination }
+func (p *Plan) Module() string      { return p.module }
+
+// Files returns the generated paths relative to Destination, in deterministic order.
+func (p *Plan) Files() []string {
+	names := make([]string, len(p.files))
+	for i, file := range p.files {
+		names[i] = file.name
+	}
+	return names
+}
+
+// PlanNew validates a new project and renders its files without creating it.
+func PlanNew(parent, name, module string) (*Plan, error) {
 	if err := validateName(name); err != nil {
-		return "", err
+		return nil, err
 	}
 	destination, err := filepath.Abs(filepath.Join(parent, name))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	files, err := render(name, module)
 	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(filepath.Dir(destination))
+	if err != nil {
+		return nil, fmt.Errorf("inspect project parent: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, errors.New("project parent must be a directory")
+	}
+	if _, err := os.Lstat(destination); err == nil {
+		return nil, fmt.Errorf("project destination already exists: %s", destination)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	return &Plan{destination: destination, module: module, files: files, createDirectory: true}, nil
+}
+
+// PlanInit validates an existing destination, preserving optional Git metadata.
+func PlanInit(directory, module string) (*Plan, error) {
+	destination, err := filepath.Abs(directory)
+	if err != nil {
+		return nil, err
+	}
+	name := filepath.Base(destination)
+	if err := validateName(name); err != nil {
+		return nil, err
+	}
+	files, err := render(name, module)
+	if err != nil {
+		return nil, err
+	}
+	root, err := openDestination(destination)
+	if err != nil {
+		return nil, err
+	}
+	if err := root.Close(); err != nil {
+		return nil, err
+	}
+	return &Plan{destination: destination, module: module, files: files}, nil
+}
+
+// Generate applies the plan. Existing files are never overwritten.
+func (p *Plan) Generate() (string, error) {
+	if p.createDirectory {
+		if err := os.Mkdir(p.destination, 0755); err != nil {
+			return "", fmt.Errorf("create project directory: %w", err)
+		}
+	}
+	if err := populate(p.destination, p.files); err != nil {
+		if p.createDirectory {
+			// Remove only an empty directory; never recursively delete user files.
+			err = errors.Join(err, os.Remove(p.destination))
+		}
 		return "", err
 	}
-	if err := os.Mkdir(destination, 0755); err != nil {
-		return "", fmt.Errorf("create project directory: %w", err)
+	return p.destination, nil
+}
+
+// New creates a project inside parent. An existing target is always refused.
+func New(parent, name, module string) (string, error) {
+	plan, err := PlanNew(parent, name, module)
+	if err != nil {
+		return "", err
 	}
-	if err := populate(destination, files); err != nil {
-		// Only remove an empty directory; never recursively delete user files.
-		cleanupErr := os.Remove(destination)
-		return "", errors.Join(err, cleanupErr)
-	}
-	return destination, nil
+	return plan.Generate()
 }
 
 // Init initializes an existing directory containing only optional Git metadata.
 func Init(directory, module string) (string, error) {
-	destination, err := filepath.Abs(directory)
+	plan, err := PlanInit(directory, module)
 	if err != nil {
 		return "", err
 	}
-	name := filepath.Base(destination)
-	if err := validateName(name); err != nil {
-		return "", err
-	}
-	files, err := render(name, module)
-	if err != nil {
-		return "", err
-	}
-	if err := populate(destination, files); err != nil {
-		return "", err
-	}
-	return destination, nil
+	return plan.Generate()
 }
 
 type renderedFile struct {
@@ -104,31 +169,41 @@ func render(name, module string) ([]renderedFile, error) {
 	return files, err
 }
 
-// populate confines writes to an opened directory and uses exclusive creation.
-// On failure it removes only paths this invocation created, in reverse order.
-func populate(directory string, files []renderedFile) (result error) {
+func openDestination(directory string) (*os.Root, error) {
 	info, err := os.Lstat(directory)
 	if err != nil {
-		return fmt.Errorf("open destination: %w", err)
+		return nil, fmt.Errorf("open destination: %w", err)
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("destination must be a real directory, not a symlink")
+		return nil, errors.New("destination must be a real directory, not a symlink")
 	}
 	root, err := os.OpenRoot(directory)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer root.Close()
 	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
-		return err
+		_ = root.Close()
+		return nil, err
 	}
 	for _, entry := range entries {
 		if entry.Name() == ".git" && (entry.IsDir() || entry.Type().IsRegular()) {
 			continue
 		}
-		return errors.New("destination contains files other than Git metadata; no files were changed")
+		_ = root.Close()
+		return nil, errors.New("destination contains files other than Git metadata; no files were changed")
 	}
+	return root, nil
+}
+
+// populate confines writes to an opened directory and uses exclusive creation.
+// On failure it removes only paths this invocation created, in reverse order.
+func populate(directory string, files []renderedFile) (result error) {
+	root, err := openDestination(directory)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	var created []string
 	defer func() {
 		if result == nil {

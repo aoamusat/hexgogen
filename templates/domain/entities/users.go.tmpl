@@ -1,12 +1,14 @@
 package entities
 
 import (
-	"github.com/google/uuid"
 	"time"
+
+	"github.com/google/uuid"
 )
 
+// User is the domain entity; persistence mappings belong to the database adapter.
 type User struct {
-	ID        uuid.UUID `gorm:"type:uuid;primaryKey"`
-	Name      string    `gorm:"not null"`
-	CreatedAt time.Time `gorm:"not null"`
+	ID        uuid.UUID
+	Name      string
+	CreatedAt time.Time
 }

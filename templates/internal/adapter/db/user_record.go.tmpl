@@ -1,0 +1,26 @@
+package db
+
+import (
+	"time"
+
+	"github.com/aoamusat/hexgogen/domain/entities"
+	"github.com/google/uuid"
+)
+
+// userRecord owns the PostgreSQL/GORM mapping separately from the domain entity.
+type userRecord struct {
+	ID        uuid.UUID `gorm:"type:uuid;primaryKey"`
+	Name      string    `gorm:"not null"`
+	CreatedAt time.Time `gorm:"not null"`
+}
+
+// TableName preserves the table created by the versioned users migration.
+func (userRecord) TableName() string { return "users" }
+
+func recordFromUser(user entities.User) userRecord {
+	return userRecord{ID: user.ID, Name: user.Name, CreatedAt: user.CreatedAt}
+}
+
+func (record userRecord) entity() entities.User {
+	return entities.User{ID: record.ID, Name: record.Name, CreatedAt: record.CreatedAt}
+}

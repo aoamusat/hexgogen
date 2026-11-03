@@ -1,0 +1,31 @@
+package db
+
+import (
+	"sync"
+	"testing"
+
+	"gorm.io/gorm/schema"
+)
+
+// This check runs without PostgreSQL and guards compatibility with the SQL migration.
+func TestUserRecordMapsToExistingSchema(t *testing.T) {
+	mapping, err := schema.Parse(&userRecord{}, &sync.Map{}, schema.NamingStrategy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapping.Table != "users" {
+		t.Fatalf("mapped table %q does not match users migration", mapping.Table)
+	}
+	for _, column := range []string{"id", "name", "created_at"} {
+		if mapping.LookUpField(column) == nil {
+			t.Fatalf("missing column %s", column)
+		}
+	}
+	id := mapping.LookUpField("id")
+	if !id.PrimaryKey || id.DataType != "uuid" {
+		t.Fatal("UUID primary key mapping changed")
+	}
+	if !mapping.LookUpField("name").NotNull || !mapping.LookUpField("created_at").NotNull {
+		t.Fatal("required column constraints are missing from the persistence mapping")
+	}
+}

@@ -27,6 +27,8 @@ mkdir existing-project
 cd existing-project
 hexgogen init --module github.com/yourname/existing-project
 
+hexgogen new myapp --module github.com/yourname/myapp --dry-run
+hexgogen doctor
 hexgogen --help
 hexgogen version
 ```
@@ -55,6 +57,33 @@ fails, the project is still generated and a warning explains the next step.
 Go module downloads, containers, and database migrations are separate setup steps
 explained in the generated README.
 
+
+## Preview generation and check your tools
+
+Use `--dry-run` with `new` or `init` to preview the destination, module path, and
+complete list of files before generating a project:
+
+```sh
+hexgogen new myapp --module github.com/yourname/myapp --dry-run
+hexgogen init --dir /path/to/empty-project --dry-run
+```
+
+Previews use the same rendering and conflict checks as generation. They do not
+create directories, write application files, or initialize Git. A conflict or
+invalid input produces an error and exits nonzero. Generation checks the
+destination again before writing, so a file added after a preview is protected.
+
+Run `hexgogen doctor` before setting up a generated application. It checks the
+installed Go version against the embedded template's requirement and reports Git,
+Make, Docker, and the Docker Compose plugin. Missing, incompatible, or unrecognized
+Go installations fail the command with exit code 1. Development Go toolchains are
+reported with a compatibility warning. Missing optional tools produce warnings
+while keeping exit code 0: an existing PostgreSQL server can replace Docker, and
+Go commands can be run directly without Make.
+
+Doctor runs local version checks without installing dependencies or starting
+services. It does not check Docker daemon availability or database connectivity;
+use the generated application's `/readyz` endpoint to check its database at runtime.
 
 ## Download a release binary
 
@@ -117,7 +146,8 @@ The user example demonstrates the flow from handler to service to repository.
 Each project includes:
 
 - A create/get-user example across handlers, services, repository interfaces,
-  PostgreSQL adapters, and a versioned SQL migration.
+  PostgreSQL adapters, and a versioned SQL migration. Domain entities remain
+  separate from the adapter's ORM persistence models.
 - Consistent JSON responses, validation, application-error mapping, and request IDs.
 - `/healthz` and `/readyz` endpoints.
 - Zerolog JSON logs with configurable levels and structured request fields.
@@ -165,7 +195,8 @@ make check
 
 Checks include formatting (including template Go files), vet, race tests, and a CLI
 build. Generation tests verify module replacement, dotfiles, invalid inputs,
-overwrite refusal, filesystem confinement, and cleanup. They also generate an
+overwrite refusal, filesystem confinement, preview consistency, domain boundaries,
+and cleanup. Doctor tests cover Go compatibility and optional tool availability. They also generate an
 application and run its vet, race tests, and build; a local module name is built
 as well. The first full run needs access to download the application's Go modules
 unless they are already cached. `go test -short ./...` skips the generated
